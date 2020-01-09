@@ -1,3 +1,3 @@
-# Harvard_Data-Science_Capstone_Project 1
+# # HarvardX Data Science Professional Certificate Capstone Project Part 1
 
-- **Recommender systems with Movielens 10M Dataset**
+- **Recommender systems with Movielens Dataset**
