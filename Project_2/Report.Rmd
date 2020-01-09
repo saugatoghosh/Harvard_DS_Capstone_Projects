@@ -1,0 +1,491 @@
+---
+title: "Credit Card Fraud Detection"
+author: "Sougata Ghosh"
+date: "08/01/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='Figs/',
+                      echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+## Introduction
+
+Billions of dollars of loss are caused every year due to fraudulent credit card transactions. The design of efficient fraud detection algorithms is key to reducing these losses, and more algorithms rely on advanced machine learning techniques to assist fraud investigators. The design of fraud detection algorithms is however particularly challenging due to non-stationary distribution of the data, highly imbalanced classes distributions and continuous streams of transactions. At the same time public data are scarcely available for confidentiality issues, leaving unanswered many questions about which is the best strategy to deal with them.
+
+The dataset from Kaggle available at(https://www.kaggle.com/mlg-ulb/creditcardfraud) contains transactions made by credit cards in September 2013 by european cardholders.This dataset presents transactions that occurred in two days, where we have 492 frauds out of 284,807 transactions. The dataset is highly unbalanced, the positive class (frauds) account for 0.172% of all transactions.
+
+It contains only numerical input variables which are the result of a PCA transformation. Unfortunately, due to confidentiality issues, we do not have access to the original features and more background information about the data. Features V1, V2, ... V28 are the principal components obtained with PCA, the only features which have not been transformed with PCA are 'Time' and 'Amount'. Feature 'Time' contains the seconds elapsed between each transaction and the first transaction in the dataset. The feature 'Amount' is the transaction Amount, this feature can be used for example-dependant cost-senstive learning. Feature 'Class' is the response variable and it takes value 1 in case of fraud and 0 otherwise.
+
+The objective of the project is to train a machine learning algorithm on the dataset to successfully predict fraudulent transactions.
+
+Given the class imbalance ratio, we recommend measuring the accuracy using the Area Under the Precision-Recall Curve (AUCC). Confusion matrix accuracy is not meaningful for unbalanced classification.
+
+We also recommend using different sampling techniques (detailed below) on the train dataset in order to address the issue of imbalanced classes while training our models.
+
+The dataset has been collected and analysed during a research collaboration of Worldline and the Machine Learning Group (http://mlg.ulb.ac.be) of ULB (Université Libre de Bruxelles) on big data mining and fraud detection. More details on current and past projects on related topics are available on https://www.researchgate.net/project/Fraud-detection-5 and the page of the DefeatFraud project
+
+
+## Methods/ Analysis
+
+```{r packages}
+#Load Packages
+if (!require(dplyr)) install.packages('dplyr')
+library(dplyr) # for data manipulation
+if (!require(stringr)) install.packages('stringr')
+library(stringr) # for data manipulation
+if (!require(caret)) install.packages('caret')
+library(caret) # for sampling
+if (!require(caTools)) install.packages('caTools')
+library(caTools) # for train/test split
+if (!require(ggplot2)) install.packages('ggplot2')
+library(ggplot2) # for data visualization
+if (!require(corrplot)) install.packages('corrplot')
+library(corrplot) # for correlations
+if (!require(Rtsne)) install.packages('Rtsne')
+library(Rtsne) # for tsne plotting
+if (!require(DMwR)) install.packages('DMwR')
+library(DMwR) # for smote implementation
+if (!require(ROSE)) install.packages('ROSE')
+library(ROSE)# for ROSE sampling
+if (!require(rpart)) install.packages('rpart')
+library(rpart)# for decision tree model
+if (!require(Rborist)) install.packages('Rborist')
+library(Rborist)# for random forest model
+if (!require(xgboost)) install.packages('xgboost')
+library(xgboost) # for xgboost model
+```
+
+
+```{r data}
+#Load data
+
+df<- read.csv("creditcard.csv")
+
+```
+
+### Basic Exploration
+
+
+```{r}
+head(df)
+```
+
+```{r}
+str(df)
+
+```
+
+The dataframe has 284807 observations with 31 variables. The variable 'Class' indicates whether a transaction is fraudulent(1) or not (0).
+
+```{r summary}
+
+summary(df)
+
+```
+
+All the anonymised features seem to have been be normalised with mean 0. We will apply that transformation to the “Amount” column later on to facilitate training ML models.
+
+
+```{r missing values}
+#Check for missing values
+colSums(is.na(df))
+```
+
+None of the variables have missing values
+
+```{r class imbalance}
+#Check class imbalance
+table(df$Class)
+prop.table(table(df$Class))
+
+```
+
+
+```{r imbalance visual}
+
+common_theme <- theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggplot(data = df, aes(x = factor(Class), 
+                          y = prop.table(stat(count)), fill = factor(Class),
+                          label = scales::percent(prop.table(stat(count))))) +
+    geom_bar(position = "dodge") + 
+    geom_text(stat = 'count',
+              position = position_dodge(.9), 
+              vjust = -0.5, 
+              size = 3) + 
+    scale_x_discrete(labels = c("no fraud", "fraud"))+
+    scale_y_continuous(labels = scales::percent)+
+    labs(x = 'Class', y = 'Percentage') +
+    ggtitle("Distribution of class labels") +
+    common_theme
+      
+```
+
+Clearly the dataset is very imbalanced with 99.8% of cases being non-fraudulent transactions. A simple measure like accuracy is not appropriate here as even a classifier which labels all transactions as non-fraudulent will have over 99% accuracy. An appropriate measure of model performance here would be AUC (Area Under the Precision-Recall Curve).
+
+### Data Visualization
+
+**Distribution of variable 'Time' by class**
+
+```{r Time}
+df %>%
+  ggplot(aes(x = Time, fill = factor(Class))) + geom_histogram(bins = 100)+
+  labs(x = 'Time in seconds since first transaction', y = 'No. of transactions') +
+  ggtitle('Distribution of time of transaction by class') +
+  facet_grid(Class ~ ., scales = 'free_y') + common_theme
+
+```
+
+The 'Time' feature looks pretty similar across both types of transactions. One could argue that fraudulent transactions are more uniformly distributed, while normal transactions have a cyclical distribution. 
+
+
+**Distribution of variable 'Amount' by class**
+
+```{r Amount}
+ggplot(df, aes(x = factor(Class), y = Amount)) + geom_boxplot() + 
+labs(x = 'Class', y = 'Amount') +
+ggtitle("Distribution of transaction amount by class") + common_theme
+
+```
+
+There is clearly a lot more variability in the transaction values for non-fraudulent transactions. 
+
+
+**Correlation of anonymised variables and 'Amount'**
+
+```{r corr}
+correlations <- cor(df[,-1],method="pearson")
+corrplot(correlations, number.cex = .9, method = "circle", type = "full", tl.cex=0.8,
+         tl.col = "black")
+
+```
+
+We observe that most of the data features are not correlated. This is because before publishing, most of the features were presented to a Principal Component Analysis (PCA) algorithm. The features V1 to V28 are most probably the Principal Components resulted after propagating the real features through PCA. We do not know if the numbering of the features reflects the importance of the Principal Components.
+
+**Visualization of transactions using t-SNE**
+
+To try to understand the data better, we will try visualizing the data using [t-Distributed Stochastic Neighbour Embedding](https://lvdmaaten.github.io/tsne/), a technique to reduce dimensionality using Barnes-Hut approximations.
+
+To train the model, perplexity was set to 20. 
+
+The visualisation should give us a hint as to whether there exist any “discoverable” patterns in the data which the model could learn. If there is no obvious structure in the data, it is more likely that the model will perform poorly.
+
+```{r t-sne}
+# Use 10% of data to compute t-SNE
+tsne_subset <- 1:as.integer(0.1*nrow(df))
+tsne <- Rtsne(df[tsne_subset,-c(1, 31)], perplexity = 20, theta = 0.5, pca = F, 
+              verbose = F, max_iter = 500, check_duplicates = F)
+
+classes <- as.factor(df$Class[tsne_subset])
+tsne_mat <- as.data.frame(tsne$Y)
+ggplot(tsne_mat, aes(x = V1, y = V2)) + geom_point(aes(color = classes)) + 
+  theme_minimal() + common_theme + 
+  ggtitle("t-SNE visualisation of transactions") + 
+  scale_color_manual(values = c("#E69F00", "#56B4E9"))
+```
+
+There appears to be a separation between the two classes as most fraudulent transactions seem to lie near the edge of the blob of data.
+
+### Modeling Approach
+
+Standard machine learning algorithms struggle with accuracy on imbalanced data for the following reasons:
+
+1. ML algorithms struggle with accuracy because of the unequal distribution in dependent variable.This causes the performance of existing classifiers to get biased towards majority class.
+2. The algorithms are accuracy driven i.e. they aim to minimize the overall error to which the minority class contributes very little.
+3. ML algorithms assume that the data set has balanced class distributions.
+4. They also assume that errors obtained from different classes have same cost 
+
+The methods to deal with this problem are widely known as ‘Sampling Methods’. Generally, these methods aim to modify an imbalanced data into balanced distribution using some mechanism. The modification occurs by altering the size of original data set and provide the same proportion of balance.
+
+These methods have acquired higher importance after many researches have proved that balanced data results in improved overall classification performance compared to an imbalanced data set. Hence, it’s important to learn them.
+
+Below are the methods used here to treat the imbalanced dataset:
+
+- Undersampling
+- Oversampling
+- Synthetic Data Generation
+
+**Undersampling**
+
+This method reduces the number of observations from majority class to make the data set balanced. This method is best to use when the data set is huge and reducing the number of training samples helps to improve run time and storage troubles.
+
+Undersampling methods are of 2 types: Random and Informative.
+
+Random undersampling method randomly chooses observations from majority class which are eliminated until the data set gets balanced. Informative undersampling follows a pre-specified selection criterion to remove the observations from majority class.
+
+A possible problem with this method is that removing observations may cause the training data to lose important information pertaining to majority class.
+
+**Oversampling**
+
+This method works with minority class. It replicates the observations from minority class to balance the data. It is also known as upsampling. Similar to undersampling, this method also can be divided into two types: Random Oversampling and Informative Oversampling.
+
+Random oversampling balances the data by randomly oversampling the minority class. Informative oversampling uses a pre-specified criterion and synthetically generates minority class observations.
+
+An advantage of using this method is that it leads to no information loss. The disadvantage of using this method is that, since oversampling simply adds replicated observations in original data set, it ends up adding multiple observations of several types, thus leading to overfitting. 
+
+**Synthetic Data Generation (SMOTE and ROSE)**
+
+In simple words, instead of replicating and adding the observations from the minority class, it overcome imbalances by generates artificial data. It is also a type of oversampling technique.
+
+In regards to synthetic data generation, synthetic minority oversampling technique (SMOTE) is a powerful and widely used method. SMOTE algorithm draws artificial samples by choosing points that lie on the line connecting the rare observation to one of its nearest neighbors in the feature space. ROSE (random over-sampling examples) uses smoothed bootstrapping to draw artificial samples from the feature space neighbourhood around the minority class.
+
+**It is important to note that sampling techniques should only be applied to the training set and not the testing set.** 
+
+Our modeling approach will involve training a single classifier on the train set with class imbalance suitably altered using each of the techniques above. Depending on which technique yields the best roc-auc score on a holdout test set. we will build subsequent models using that chosen technique.
+
+
+### Data Preparation
+
+'Time' feature does not indicate the actual time of the transaction and is more of listing the data in chronological order. Based on the data visualization above we assume that 'Time' feature has little or no significance in correctly classifying a fraud transaction and hence eliminate this column from further analysis.
+
+```{r data prep}
+#Remove 'Time' variable
+df <- df[,-1]
+
+#Change 'Class' variable to factor
+df$Class <- as.factor(df$Class)
+levels(df$Class) <- c("Not_Fraud", "Fraud")
+
+#Scale numeric variables
+
+df[,-30] <- scale(df[,-30])
+
+```
+
+Split data into train and test sets 
+
+```{r train test split}
+set.seed(123)
+split <- sample.split(df$Class, SplitRatio = 0.7)
+train <-  subset(df, split == TRUE)
+test <- subset(df, split == FALSE)
+
+```
+
+
+
+### Choosing sampling technique
+
+Let us create different versions of the training set as per sampling technique
+
+```{r}
+table(train$Class)
+```
+
+
+```{r down sampling}
+
+set.seed(9560)
+down_train <- downSample(x = train[, -ncol(train)],
+                         y = train$Class)
+table(down_train$Class)  
+
+```
+
+```{r up sampling}
+
+set.seed(9560)
+up_train <- upSample(x = train[, -ncol(train)],
+                         y = train$Class)
+table(up_train$Class)  
+
+
+```
+
+```{r SMOTE sampling}
+
+set.seed(9560)
+smote_train <- SMOTE(Class ~ ., data  = train)
+
+table(smote_train$Class)  
+
+
+```
+
+```{r ROSE sampling}
+
+set.seed(9560)
+rose_train <- ROSE(Class ~ ., data  = train)$data 
+
+table(rose_train$Class) 
+
+```
+
+
+We choose CART(classification and regression tree) as first model.
+ 
+Before we start using sampling let us first look at how CART performs with imbalanced data. We use the function *roc.curve* available in the ROSE package to gauge model performance on the test set.
+ 
+```{r rpart}
+#CART Model Performance on imbalanced data
+set.seed(5627)
+
+orig_fit <- rpart(Class ~ ., data = train)
+
+#Evaluate model performance on test set
+pred_orig <- predict(orig_fit, newdata = test, method = "class")
+
+roc.curve(test$Class, pred_orig[,2], plotit = TRUE)
+
+```
+
+
+We evaluate the model performance on test data by finding the roc auc score
+
+We see that the auc score on the original dataset is 0.912 . We will now apply various sampling techniques to the data and see the performance on the test set.
+
+
+
+```{r sampling}
+
+set.seed(5627)
+# Build down-sampled model
+
+
+down_fit <- rpart(Class ~ ., data = down_train)
+
+
+set.seed(5627)
+# Build up-sampled model
+
+
+up_fit <- rpart(Class ~ ., data = up_train)
+
+
+set.seed(5627)
+# Build smote model
+
+
+smote_fit <- rpart(Class ~ ., data = smote_train)
+
+set.seed(5627)
+# Build rose model
+
+
+rose_fit <- rpart(Class ~ ., data = rose_train)
+```
+
+
+```{r sampling fit}
+
+pred_down <- predict(down_fit, newdata = test)
+
+print('Fitting downsampled model to test data')
+roc.curve(test$Class, pred_down[,2], plotit = FALSE)
+
+pred_up <- predict(up_fit, newdata = test)
+
+print('Fitting upsampled model to test data')
+roc.curve(test$Class, pred_up[,2], plotit = FALSE)
+
+pred_smote <- predict(smote_fit, newdata = test)
+
+print('Fitting smote model to test data')
+roc.curve(test$Class, pred_smote[,2], plotit = FALSE)
+
+pred_rose <- predict(rose_fit, newdata = test)
+
+print('Fitting rose model to test data')
+roc.curve(test$Class, pred_rose[,2], plotit = FALSE)
+
+
+
+
+```
+
+
+We see that all the sampling techniques have yielded better auc scores than the simple imbalanced dataset. We will test different models now using the **up sampling technique** as that has given the highest auc score.
+
+## Results
+
+Specifically the following models will be tested:
+
+- logistic regression (GLM)
+- random forest (RF)
+- xgboost (XGB)
+1
+
+### GLM Fit
+
+```{r glm, warning= FALSE}
+
+glm_fit <- glm(Class ~ ., data = up_train, family = 'binomial')
+
+pred_glm <- predict(glm_fit, newdata = test, type = 'response')
+
+roc.curve(test$Class, pred_glm, plotit = TRUE)
+```
+
+
+### RF Fit (we use the Rborist package)
+
+```{r rf}
+
+x = up_train[, -30]
+y = up_train[,30]
+
+rf_fit <- Rborist(x, y, ntree = 500, minNode = 20, maxLeaf = 13)
+
+
+rf_pred <- predict(rf_fit, test[,-30], ctgCensus = "prob")
+prob <- rf_pred$prob
+
+roc.curve(test$Class, prob[,2], plotit = TRUE)
+
+
+
+```
+
+
+### XGB Fit
+
+```{r xgb}
+
+#COnvert class labels from factor to numeric
+
+labels <- up_train$Class
+
+y <- recode(labels, 'Not_Fraud' = 0, "Fraud" = 1)
+
+
+xgb <- xgboost(data = data.matrix(up_train[,-30]), 
+ label = y,
+ eta = 0.1,
+ gamma = 0.1,
+ max_depth = 10, 
+ nrounds = 300, 
+ objective = "binary:logistic",
+ colsample_bytree = 0.6,
+ verbose = 0,
+ nthread = 7,
+ seed = 42
+)
+
+
+xgb_pred <- predict(xgb, data.matrix(test[,-30]))
+
+roc.curve(test$Class, xgb_pred, plotit = TRUE)
+
+```
+
+
+We can also take a look at the important features here.
+
+```{r importance}
+names <- dimnames(data.matrix(up_train[,-30]))[[2]]
+
+# Compute feature importance matrix
+importance_matrix <- xgb.importance(names, model = xgb)
+# Nice graph
+xgb.plot.importance(importance_matrix[1:10,])
+
+```
+
+
+With an auc score of 0.977 the XGBOOST model has performed the best though both the random forest and logistic regression models have shown reasonable performance.
+
+## Conclusion
+
+In this project we have tried to show different methods of dealing with unbalanced datasets like the fraud credit card transaction dataset where the instances of fraudulent cases is few compared to the instances of normal transactions. We have argued why accuracy is not a appropriate measure of model performance here and used the metric AREA UNDER ROC CURVE to evaluate how different methods of oversampling or undersampling the response variable can lead to better model training. We concluded that the oversampling technique works best on the dataset and achieved significant improvement in model performance over the imbalanced data. The best score of 0.977 was achieved using an XGBOOST model though both random forest and logistic regression models performed well too. It is likely that by further tuning the XGBOOST model parameters we can achieve even better performance. However this exercise has demonstrated the importance of sampling in effectively modelling and predicting with an imbalanced dataset. 
